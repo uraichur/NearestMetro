@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>NearestMetro</title>
+  <title>XploreBot — Metro Trip Planner (Bengaluru)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 
   <!-- Leaflet -->
@@ -26,12 +26,12 @@
       display:grid; grid-template-rows:auto 1fr; min-height:100vh;
     }
 
-    /* Top bar */
     header{
       position:sticky; top:0; z-index:1000;
       padding:10px 14px; padding-top:calc(10px + var(--safe-top));
       background:var(--panel); border-bottom:1px solid #1c2c57;
       display:grid; grid-template-columns:1fr auto; gap:8px; align-items:center;
+      overflow:visible;
     }
     .inputs{ display:flex; gap:8px; width:100%; align-items:center }
     .input-wrap{ position:relative; flex:1; min-width:260px; display:flex; gap:6px; align-items:center }
@@ -50,10 +50,9 @@
       background:var(--brand); color:#071224; border:0; padding:12px 16px;
       border-radius:10px; cursor:pointer; font-weight:700; white-space:nowrap; min-height:44px;
     }
-    /* Suggestions absolute so inputs don't grow */
     .geoapify-autocomplete-items{
       position:absolute; top:calc(100% + 6px); left:0; right:0;
-      max-height:min(50vh, 320px); overflow:auto; z-index:9999;
+      max-height:min(50vh, 320px); overflow:auto; z-index:2147483647;
       background:#0e1430; border:1px solid #2a3260; color:var(--text);
       border-radius:12px; -webkit-overflow-scrolling:touch;
     }
@@ -61,7 +60,6 @@
     .geoapify-autocomplete-item.active, .geoapify-autocomplete-item:hover{ background:#1a2147 }
     .geoapify-close-button{ display:none !important }
 
-    /* Main area: map + right panel (desktop) */
     .main{
       display:grid; grid-template-columns:1fr 420px; grid-template-rows:1fr; gap:12px;
       padding:12px; height:100%;
@@ -79,9 +77,8 @@
     .spinner{ width:14px; height:14px; border:2px solid #2a4699; border-top-color:#8fb3ff; border-radius:50%; animation:spin .8s linear infinite }
     @keyframes spin{ to{ transform:rotate(360deg) } }
 
-    /* Mobile: panel becomes bottom sheet */
     @media (max-width: 1023.98px){
-      header{ grid-template-columns:1fr; gap:10px }
+      header{ grid-template-columns:1fr; gap:10px; overflow:visible }
       .inputs{ flex-direction:column; align-items:stretch }
       .input-wrap{ min-width:unset }
       .main{ grid-template-columns:1fr; grid-template-rows:1fr auto; padding:0 }
@@ -89,6 +86,9 @@
       .panel{
         border-left:none; border-right:none; border-bottom:none; border-radius:14px 14px 0 0;
         position:sticky; bottom:0; max-height:55vh; backdrop-filter:blur(8px)
+      }
+      .geoapify-autocomplete-items{
+        position:fixed; left:14px; right:14px; width:auto;
       }
     }
   </style>
@@ -125,14 +125,14 @@
   const TILE_URL = `https://maps.geoapify.com/v1/tile/dark-matter-brown/{z}/{x}/{y}.png?apiKey=${API_KEY}`;
   const ATTRIB = '© <a href="https://www.openstreetmap.org/copyright" target="_blank">OSM</a>, © <a href="https://www.geoapify.com/" target="_blank">Geoapify</a>';
 
-  // Rule thresholds
+  // Thresholds
   const WALK_MAX = 500;
   const RICK_MAX = 2100;
   const BUS_STOP_RADIUS = 3000;
   const BUS_QUERY_LIMIT = 50;
   const STOP_WALK_MAX = 500;
 
-  // Performance caps
+  // Performance caps & timeouts
   const CAND_A_MAX = 8;
   const CAND_B_MAX = 8;
   const PAIRS_PER_A = 3;
@@ -151,12 +151,22 @@
   // ====== AUTOCOMPLETE ======
   const { GeocoderAutocomplete } = window.autocomplete;
   function makeAutocomplete(el){
-    return new GeocoderAutocomplete(el, API_KEY, {
+    const ac = new GeocoderAutocomplete(el, API_KEY, {
       placeholder: "Bengaluru place or address",
       lang: "en",
       filter: { countrycode: ["in"], circle: BLR },
       bias: { proximity: BLR }
     });
+    // Mobile UX: keep focused field visible when keyboard pops
+    setTimeout(()=>{
+      const inp = el.querySelector('.geoapify-autocomplete-input');
+      if (inp){
+        inp.addEventListener('focus', ()=> {
+          try{ inp.scrollIntoView({block:'center', behavior:'smooth'}); }catch(_){}
+        });
+      }
+    },0);
+    return ac;
   }
   const fromCtl = makeAutocomplete(document.getElementById("from"));
   const toCtl   = makeAutocomplete(document.getElementById("to"));
@@ -185,31 +195,30 @@
     fromLabel = "Picked location";
     if (pickMarker) layers.markers.removeLayer(pickMarker);
     pickMarker = L.marker([lat,lng]).addTo(layers.markers).bindPopup("<strong>From set here</strong>").openPopup();
-    // reverse geocode to prettify label & input
     try{
       const revUrl = `https://api.geoapify.com/v1/geocode/reverse?lat=${lat}&lon=${lng}&apiKey=${API_KEY}`;
       const r = await fetchWithTimeout(revUrl); const j = await r.json();
       const p = j?.features?.[0]?.properties;
       const nice = p?.name || p?.address_line1 || p?.formatted;
-      if (nice){ fromLabel = nice; try{ fromCtl.setValue(nice); }catch(_){} }
+      if (nice){ fromLabel = nice; try{ fromCtl.setValue(nice); }catch(_){ } }
     }catch(_){}
     pickMode = false;
     document.getElementById("pickBtn").textContent = "Pick";
   });
 
-  // ====== Initial geolocation (with stronger options) ======
+  // ====== Initial geolocation ======
   (async function initFrom(){
     try{
       await requestHighAccuracy(true);
     }catch(_){
-      // Soft fallback to CBD so we never end up undefined
+      // Fallback so we never end up undefined
       fromPoint = { lat: 12.9719, lon: 77.5937 };
       fromLabel = "Bengaluru (set origin)";
       try{ if (typeof fromCtl.setValue === "function") fromCtl.setValue(fromLabel); }catch(_){}
       L.marker([fromPoint.lat, fromPoint.lon]).addTo(layers.markers).bindPopup(`<strong>${escapeHtml(fromLabel)}</strong>`);
       map.setView([fromPoint.lat, fromPoint.lon], 13);
       document.getElementById("results").innerHTML =
-        `<div class="muted">Couldn't get precise GPS. Tip: enable Wi-Fi/Bluetooth scanning & precise location. Or click <strong>Pick</strong> and choose your exact spot on the map.</div>`;
+        `<div class="muted">Couldn't get precise GPS. Tip: enable Wi-Fi/Bluetooth scanning & precise location. Or click <strong>Pick</strong> to choose your exact spot.</div>`;
     }
   })();
 
@@ -234,7 +243,7 @@
       `<div class="muted">From updated via GPS. You can also <strong>Pick</strong> on the map for pinpoint accuracy.</div>`;
   }
 
-  // ====== Search click ======
+  // ====== Search ======
   document.getElementById("searchBtn").onclick = async () => {
     const r = document.getElementById("results");
     if (!validPt(fromPoint) || !validPt(toPoint)){
@@ -300,10 +309,12 @@
 
     drawPolyline([[fromM.lat, fromM.lon],[toM.lat, toM.lon]], getCss('--line-metro'), 5, null);
 
-    const totalProxy = first.dist + haversine(fromM,toM) + last.dist;
+    const metroDist = haversine(fromM,toM);
+    const totalProxy = first.dist + metroDist + last.dist;
+
     const steps = [
       first.html,
-      stepMetro(`Take Namma Metro from ${escapeHtml(fromM.name)} → ${escapeHtml(toM.name)}.`),
+      stepMetro(`Take Namma Metro from ${escapeHtml(fromM.name)} → ${escapeHtml(toM.name)} (${prettyDist(metroDist)}).`),
       last.html
     ];
     document.getElementById("results").innerHTML = `
@@ -313,7 +324,7 @@
     fitAll();
   }
 
-  // ====== Smart connector ======
+  // ====== Smart connector (walk ≤500, rick ≤2100, else bus) ======
   async function connectorSmart(a, b, direction, labels){
     const safeTo   = (labels?.dstLabel)  || (direction==="to" ? "destination" : "origin");
     const safeFrom = (labels?.srcLabel)  || (direction==="to" ? "origin" : "destination");
@@ -352,7 +363,7 @@
       return { mode:"bus", dist: bestBus.total, html };
     }
 
-    // Fallback rick
+    // Fallback rickshaw
     drawRouteCoords(rAuto.coords, getCss('--line-auto'), 4, '2 6');
     const text = direction==="from"
       ? `From ${escapeHtml(safeFrom)}, take a rickshaw to ${escapeHtml(safeTo)} (${prettyDist(rAuto.dist)})`
@@ -369,7 +380,7 @@
     const candA = rankNearest(a, stopsA, CAND_A_MAX);
     const candB = rankNearest(b, stopsB, CAND_B_MAX);
 
-    // Stage 1: coarse estimate (no network)
+    // Stage 1: coarse estimate
     let bestEst = null;
     for (const stopA of candA){
       const nearestBs = [...candB].sort((s1,s2)=>haversine(stopA,s1)-haversine(stopA,s2)).slice(0, PAIRS_PER_A);
@@ -382,7 +393,7 @@
     }
     if (!bestEst) return null;
 
-    // Stage 2: confirm only the best pair with real routing and thresholds
+    // Stage 2: confirm the best pair with routing & thresholds
     const pre  = await approachLeg(bestEst.stopA, a, "toStop");
     const post = await approachLeg(bestEst.stopB, b, "fromStop");
     const busProxy = haversine(bestEst.stopA, bestEst.stopB);
@@ -411,7 +422,6 @@
     const key = `${p.lon.toFixed(3)},${p.lat.toFixed(3)},${radius}`;
     if (busStopCache.has(key)) return busStopCache.get(key);
 
-    // Try Geoapify first (some categories may 400 in certain regions)
     const catsToTry = [
       "transport.bus_stop",
       "transport.bus_station",
@@ -441,20 +451,15 @@
       }
     }
 
-    // If Geoapify failed/empty, FALL BACK to Overpass (OSM)
     if (!out.length){
-      try{
-        out = await findBusStopsOverpass(p, radius, limit);
-      }catch(e){
-        console.warn("Overpass bus-stop fallback failed", e);
-      }
+      try{ out = await findBusStopsOverpass(p, radius, limit); }catch(e){ console.warn("Overpass fallback failed", e); }
     }
 
     busStopCache.set(key, out);
     return out;
   }
 
-  // Overpass fallback for bus stops (highway=bus_stop or public_transport=platform)
+  // Overpass fallback
   async function findBusStopsOverpass(p, radius, limit){
     const body = `[out:json][timeout:25];
       (
@@ -462,24 +467,19 @@
         node(around:${radius},${p.lat},${p.lon})["public_transport"="platform"]["bus"="yes"];
       );
       out ${Math.max(10, Math.min(200, limit))};`;
-    const r = await fetchWithTimeout("https://overpass-api.nextzen.org/api/interpreter", { // primary mirror (reliable)
-      method:"POST",
-      headers:{ "Content-Type":"application/x-www-form-urlencoded" },
+    const r = await fetchWithTimeout("https://overpass-api.nextzen.org/api/interpreter", {
+      method:"POST", headers:{ "Content-Type":"application/x-www-form-urlencoded" },
       body: "data=" + encodeURIComponent(body)
     });
     if (!r.ok){
-      // Try classic Overpass as backup
       const r2 = await fetchWithTimeout("https://overpass-api.de/api/interpreter", {
-        method:"POST",
-        headers:{ "Content-Type":"application/x-www-form-urlencoded" },
+        method:"POST", headers:{ "Content-Type":"application/x-www-form-urlencoded" },
         body: "data=" + encodeURIComponent(body)
       });
       if (!r2.ok) throw new Error("Overpass failed");
-      const j2 = await r2.json();
-      return mapOverpassStops(j2);
+      const j2 = await r2.json(); return mapOverpassStops(j2);
     }
-    const j = await r.json();
-    return mapOverpassStops(j);
+    const j = await r.json(); return mapOverpassStops(j);
   }
   function mapOverpassStops(json){
     const els = json?.elements || [];
@@ -489,7 +489,7 @@
     }).filter(validPt);
   }
 
-  // ====== Routing (with caching + timeouts) ======
+  // ====== Routing ======
   async function routePath(a, b, mode){
     const key = `${mode}|${a.lat.toFixed(6)},${a.lon.toFixed(6)}|${b.lat.toFixed(6)},${b.lon.toFixed(6)}`;
     if (routeCache.has(key)) return routeCache.get(key);
@@ -546,29 +546,18 @@
 
   // ====== Helpers ======
   function validPt(p){ return p && Number.isFinite(p.lat) && Number.isFinite(p.lon); }
-
   async function fetchWithTimeout(url, opts={}){
-    const ctrl = new AbortController();
-    const to = setTimeout(()=>ctrl.abort(), FETCH_TIMEOUT_MS);
-    try{
-      return await fetch(url, { ...opts, signal: ctrl.signal });
-    } finally {
-      clearTimeout(to);
-    }
+    const ctrl = new AbortController(); const to = setTimeout(()=>ctrl.abort(), FETCH_TIMEOUT_MS);
+    try{ return await fetch(url, { ...opts, signal: ctrl.signal }); }
+    finally{ clearTimeout(to); }
   }
-
-  function rankNearest(p, list, n){
-    return [...list].sort((a,b)=>haversine(p,a)-haversine(p,b)).slice(0, n);
-  }
-
+  function rankNearest(p, list, n){ return [...list].sort((a,b)=>haversine(p,a)-haversine(p,b)).slice(0, n); }
   function drawRouteCoords(coords, color, weight=4, dashArray=null){
-    const opts = { color, weight, opacity:.95 };
-    if (dashArray) opts.dashArray = dashArray;
+    const opts = { color, weight, opacity:.95 }; if (dashArray) opts.dashArray = dashArray;
     L.polyline(coords, opts).addTo(layers.routes);
   }
   function drawPolyline(latlngs, color, weight=4, dash=null){
-    const opts = { color, weight, opacity:.95 };
-    if (dash) opts.dashArray = dash;
+    const opts = { color, weight, opacity:.95 }; if (dash) opts.dashArray = dash;
     L.polyline(latlngs, opts).addTo(layers.lines);
   }
   function clearMap(){ layers.routes.clearLayers(); layers.lines.clearLayers(); layers.markers.clearLayers(); }
@@ -598,4 +587,3 @@
 </script>
 </body>
 </html>
-
